@@ -1,0 +1,158 @@
+---
+title: "Traffic Assignment Using R"
+author: "Manos Chaniotakis"
+output:
+  html_notebook
+---
+
+# Introduction
+
+This is a short tutorial that aim at going through the steps for the performing traffic assignment (another term commonly used for the same thing is network loading). For the purposes of this analysis a very simple network has been defined. 
+
+
+![Toy Network for traffic assignment](DemoNetwork.png)
+
+# Theoretical Background
+
+At this point it is useful to remember some of the basic background. The first thing to keep in mind is that this is a model, thus a way to represent reality. It is based on the very well known Wardrop principle which states: 
+
+<center>
+*The journey times in all routes actually used are equal and less than those which would be experienced by a single vehicle/traveller on any unused route*
+</center>
+
+The above principle has been the basis for the development of what we call "user equilibrium". It is based on the notion that each traveller will try to minimize their own travel time. This is in contrast to what we refer to as system optimum, which indicates that there is a solution which minimizes the total travel time. 
+
+## Formulation
+
+The basic optimization problem that is solved is formulated by Beckmann et al. (1956): 
+
+$$\min_{Q_a}Z = \sum_{a} \int_{0}^{q_a} t_a(x) dx$$
+s.t.
+$$\sum_{r}T_{ijr} = T_{ij}$$
+$$T_{ijr} \geq 0$$
+$$q_a = \sum_{i}\sum_{j}\sum_{r}\alpha_{ijr}^{\alpha}\cdot T_{ijr}$$
+
+Where: 
+$i$ = origin, $j$ = destination, $r$= route, $\alpha$ = link, $Tij$ = number of trips from $i$ to $j$ (traffic flow)
+$Tijr$ = number of trips from $i$ to $j$ on route $r$ (route flow), $q_{\alpha}$ = traffic flow on link $\alpha$, $Q_{\alpha}$ = vector of traffic flow on link $\alpha$
+
+In words the optimization technique aims at determining the link flows $q_\alpha$ such that the sum of the corresponding areas underneath the link travel time functions is minimal, taking into account the flow conservation constraints and non-negativities.
+
+A graphical illustration of the optimization problem is illustrated in the following picture: 
+
+![Beckmann Optimization formulation. Source: TU Delft notes for advances transport modelling course](Beckmann.png)
+
+## Cost functions
+
+One of the main things to take into account when solving the above problem is that there should be a way to describe the cost of using one link based on the flow on the network. This means that there should be a function that for example, grades the travel time of travelling on a link (without any other traffic) as free flow travel time, which increases as congestion builds up. 
+
+Such a (very commonly used) function is the BPR function (Bureau of Public Roads). 
+
+$$t_\alpha(q_\alpha) = t^{0}_{\alpha}\left(1+ a\cdot \left(\frac{q_\alpha}{C_\alpha}\right)^b \right)$$
+where $t_a$ refers to the travel time for a link, $t^0_a$ to the free flow travel time, and $C_a$ to capacity of link $\alpha$.Note that $a$ and $b$ are parameters to calibrate the function for different road conditions (e.g. motorway, arterial road etcetera).
+
+## Solution algorithm
+
+The Frank and Wolfe 1956 algorithm is very well known in the transport community and it has been extensively used. Note that in the steps below, we use the Method of Successive averages (step 4). 
+
+* *Step 0: Initialization*  Perform an All or Nothing Assignment (everyone is assigned to the route which has the lowest free flow travel time). 
+* *Step 2* Estimate link travel time ($t_\alpha \forall \alpha$).
+* *Step 3 and 4* Determine descent direction and step size: MSA is used $α(i)=1/i$
+* *Step 5* Descent: $q^{i+1}=q^i + (w^i-q^i) $ where $w^i$ refers to the within iteration newly estimated flows (auxiliary flow vector)
+* *Step 6* Check Convergence
+
+In the sections below the implementation of the traffic assignment is presented. 
+
+# Case Study
+
+## Input and Data Needs
+
+As you will find out, the files loaded describe the necessary input. Specifically: 
+
+1. Network Information.
+    a. Assignment Matrix: This is a matrix that describes the routes that are available for users to follow. If a link is included in one route, then this link is noted with "1", if not then it is "0" (variables `X1` to `X8`. Additional variables for code convenience are i) the `OD` variable, indicating which OD each route refers to; and ii) the `Route` which is simply an index for each route.
+    b. The second file related to the network is the link file. This includes, two variables namely `Capacity` and `Free.Flow`. Each row, represents the links that included in the routes examined and consequently the assignment matrix.  
+2. Demand Information. This includes the trips taking place from each origin to each destination. As you will find out, this is represented in a list (data-frame to be precise but each row represents an *OD pair*)
+
+```{r,echo=TRUE}
+AssignmentMatrix <- read.csv("AssignmentMatrix.csv",stringsAsFactors = FALSE)
+AssignmentMatrix
+
+Capac_FreeFlow   <- read.csv("Cap_FreFlow.csv"     ,stringsAsFactors = FALSE)
+Capac_FreeFlow
+
+Demand           <- read.csv("Demand.csv"          ,stringsAsFactors = FALSE)
+Demand
+```
+
+
+In addition, it is necessary to define some additional parameters that are used in the evaluation of cost for each link, for the selection of routes and finally, some data manipulations. 
+
+## Data manipulations and specification
+
+```{r, eval=TRUE,echo=TRUE}
+Logit_Sue	<- -0.3
+Alfa      <- 0.15 
+Beta      <- 4
+mu        <- 0.3
+
+iterations<- 500
+
+LinkFlows                            <- numeric(nrow(Capac_FreeFlow))
+RouteFlows                           <- numeric(nrow(AssignmentMatrix))
+
+# Formatting the Assignment Matrix
+AssignmentMatrix_MatrixFormat        <- AssignmentMatrix
+AssignmentMatrix_MatrixFormat$OD     <- NULL
+AssignmentMatrix_MatrixFormat$Route  <- NULL
+AssignmentMatrix_MatrixFormat <- data.matrix(AssignmentMatrix_MatrixFormat)
+```
+
+
+## Estimating the Stochastic User Equilibrium
+
+```{r, eval=TRUE,echo=TRUE}
+# Getting the unique ODs
+ODs <- unique(AssignmentMatrix$OD)
+
+
+LinkCosts       <- Capac_FreeFlow$Free.Flow*(1 + Alfa*(LinkFlows/Capac_FreeFlow$Capacity)^Beta)
+RouteCostMatrix <- AssignmentMatrix_MatrixFormat*LinkCosts
+RouteCosts      <- rowSums(RouteCostMatrix)
+
+for(i in 1:iterations){
+  
+  for(j in 1:length(ODs)){
+    ExaminedOD <- ODs[j]
+    RoutesForExaminedOD <- which(AssignmentMatrix$OD==ExaminedOD)
+    ExaminedRoutesCosts <- RouteCosts[RoutesForExaminedOD]
+    # SUE
+    # ExaminedRouteFlows  <- exp(-ExaminedRoutesCosts)/ sum(exp(-ExaminedRoutesCosts))* 
+    #   Demand$Demand[Demand$OD == ExaminedOD]
+    ExaminedRouteFlows  <- exp(mu*ExaminedRoutesCosts)/ sum(exp(mu*ExaminedRoutesCosts))* 
+      Demand$Demand[Demand$OD == ExaminedOD]
+    RouteFlows[RoutesForExaminedOD] <- ExaminedRouteFlows
+  }
+  
+  LinkFlows <- LinkFlows+ (colSums(AssignmentMatrix_MatrixFormat * RouteFlows)-LinkFlows)/i
+  
+  # Estimate Link Costs
+  LinkCosts       <- Capac_FreeFlow$Free.Flow*(1 + Alfa*(LinkFlows/Capac_FreeFlow$Capacity)^Beta)
+  RouteCostMatrix <- AssignmentMatrix_MatrixFormat*LinkCosts
+  RouteCosts      <- rowSums(RouteCostMatrix)
+
+  
+}
+
+
+
+```
+
+
+# Exercise
+
+You are asked to adjust the input data for another network. 
+
+
+# References
+Beckmann, M., McGuire, C. B., & Winsten, C. B. (1956). Studies in the Economics of Transportation (No. 226 pp).
